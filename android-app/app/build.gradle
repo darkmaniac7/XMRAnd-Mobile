@@ -1,0 +1,53 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "io.xmrand.wrapper"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId providers.gradleProperty("xmrandTestApplicationId").getOrElse("io.xmrand.mobile")
+        testInstrumentationRunner "io.xmrand.wrapper.ConfigDeviceTest"
+        minSdk 26
+        targetSdk 35
+        versionCode 5
+        versionName "0.2.0"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging true
+        }
+    }
+
+    testOptions {
+        unitTests {
+            returnDefaultValues = true
+        }
+    }
+    sourceSets {
+        main.assets.srcDir "../../docs/public-assets"
+    }
+}
+
+dependencies {
+    testImplementation "junit:junit:4.13.2"
+    testImplementation "org.json:json:20240303"
+}
+
+// Never produce a downloadable APK that has no miner inside it.
+tasks.configureEach {
+    if (name == "mergeDebugNativeLibs" || name == "mergeReleaseNativeLibs") {
+        doFirst {
+            if (!file("src/main/jniLibs/arm64-v8a/libxmrig.so").isFile()) {
+                throw new GradleException("Build the native miner first: bash scripts/android/build-public-android.sh")
+            }
+        }
+    }
+}

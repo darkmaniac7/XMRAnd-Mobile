@@ -1,0 +1,24 @@
+XMRAnd Mobile
+
+This project provides Android and iOS wrappers and mobile adaptations for XMRig.
+XMRig: https://github.com/xmrig/xmrig
+License: GNU General Public License version 3 or later (see LICENSE).
+Upstream copyright and third-party notices are retained in their source files.
+
+Core source includes RandomX, CryptoNight, Argon2 and other upstream components.
+Their individual notices and licenses are retained under src/.
+
+Linked dependency sources for the provided builds:
+- libuv 1.51.0: https://github.com/libuv/libuv (MIT and notices in LICENSE).
+- OpenSSL 3.0.16: https://github.com/openssl/openssl (Apache License 2.0).
+The release provides pristine source archives for these dependencies.
+
+Optional iOS helpers are separate programs, downloaded by the preparer:
+- StikDebug: https://github.com/StephenDev0/StikDebug
+- LocalDevVPN: https://github.com/jkcoxson/LocalDevVPN
+- idevice / idevice-tools: https://github.com/jkcoxson/idevice
+Their source repositories contain their applicable licenses. Keep those licenses
+when building or redistributing the helpers. No helper binaries are bundled here.
+
+This project is not affiliated with Apple or Google. No Apple signing service,
+account credentials, provisioning profiles or device-pairing records are supplied.

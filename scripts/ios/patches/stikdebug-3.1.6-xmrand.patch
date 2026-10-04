@@ -1,0 +1,275 @@
+diff --git a/StikDebug/Device/JITEnableContext.swift b/StikDebug/Device/JITEnableContext.swift
+index 656004b..2aada9a 100644
+--- a/StikDebug/Device/JITEnableContext.swift
++++ b/StikDebug/Device/JITEnableContext.swift
+@@ -57,7 +57,10 @@ final class JITEnableContext {
+
+         var path = Array(logURL.path.utf8CString)
+         path.withUnsafeMutableBufferPointer { buffer in
+-            _ = idevice_init_logger(Info, Debug, buffer.baseAddress)
++            // Debug-level idevice logging serializes RemotePairing private-key
++            // material. Keep the shareable file at Info while retaining useful
++            // connection and JIT diagnostics.
++            _ = idevice_init_logger(Info, Info, buffer.baseAddress)
+         }
+     }
+
+@@ -600,8 +603,12 @@ final class JITEnableContext {
+         runDebugSession(logger: logger, callback: jsCallback) { remoteServer in
+             try withProcessControl(remoteServer: remoteServer) { processControl in
+                 var pid: UInt64 = 0
++                let killExisting = bundleID == "org.xmrand.mobile"
+                 let ffiError = bundleID.withCString { bundleID in
+-                    process_control_launch_app(processControl, bundleID, nil, 0, nil, 0, true, false, &pid)
++                    // XMRAnd can deep-link here from its initial icon-launched,
++                    // non-debugged process. Replace that process atomically with
++                    // the suspended debug launch instead of rejecting the request.
++                    process_control_launch_app(processControl, bundleID, nil, 0, nil, 0, true, killExisting, &pid)
+                 }
+
+                 if let ffiError {
+diff --git a/StikDebug/Services/TunnelManager.swift b/StikDebug/Services/TunnelManager.swift
+index 0249202..8845293 100644
+--- a/StikDebug/Services/TunnelManager.swift
++++ b/StikDebug/Services/TunnelManager.swift
+@@ -5,6 +5,42 @@
+
+ import Foundation
+
++private let xmrandHandoffTraceQueue = DispatchQueue(label: "org.xmrand.stikdebug.xmrand-trace")
++
++func resetXMRAndHandoffTrace() {
++    xmrandHandoffTraceQueue.async {
++        let url = URL.documentsDirectory.appendingPathComponent("xmrand_handoff.log")
++        try? Data().write(to: url, options: .atomic)
++    }
++}
++
++func appendXMRAndHandoffTrace(_ message: String) {
++    let safeMessage = message.replacingOccurrences(of: "\n", with: " ")
++    xmrandHandoffTraceQueue.async {
++        let url = URL.documentsDirectory.appendingPathComponent("xmrand_handoff.log")
++        let timestamp = ISO8601DateFormatter().string(from: Date())
++        guard let data = "\(timestamp) \(safeMessage)\n".data(using: .utf8) else {
++            return
++        }
++
++        if !FileManager.default.fileExists(atPath: url.path) {
++            try? data.write(to: url, options: .atomic)
++            return
++        }
++
++        guard let handle = try? FileHandle(forWritingTo: url) else {
++            return
++        }
++        defer { try? handle.close() }
++        do {
++            try handle.seekToEnd()
++            try handle.write(contentsOf: data)
++        } catch {
++            return
++        }
++    }
++}
++
+ final class TunnelManager: ObservableObject {
+     static let shared = TunnelManager()
+
+@@ -31,6 +67,7 @@ final class TunnelManager: ObservableObject {
+         let pairingFileURL = PairingFileStore.prepareURL()
+         guard FileManager.default.fileExists(atPath: pairingFileURL.path) else {
+             isConnected = false
++            appendXMRAndHandoffTrace("tunnel pairing-file-missing")
+             return
+         }
+
+@@ -39,6 +76,7 @@ final class TunnelManager: ObservableObject {
+         }
+
+         isStarting = true
++        appendXMRAndHandoffTrace("tunnel start")
+
+         DispatchQueue.global(qos: .userInteractive).async { [showErrorUI] in
+             let result: Result<Void, NSError>
+@@ -61,10 +99,12 @@ final class TunnelManager: ObservableObject {
+         switch result {
+         case .success:
+             isConnected = true
++            appendXMRAndHandoffTrace("tunnel connected")
+             LogManager.shared.addInfoLog("Tunnel connected successfully")
+             mountDeveloperDiskImageIfNeeded()
+         case .failure(let error):
+             isConnected = false
++            appendXMRAndHandoffTrace("tunnel failed domain=\(error.domain) code=\(error.code)")
+             handleStartFailure(error, showErrorUI: showErrorUI)
+         }
+     }
+diff --git a/StikDebug/Support/AutoScriptAssignments.swift b/StikDebug/Support/AutoScriptAssignments.swift
+index 6457e41..a76c572 100644
+--- a/StikDebug/Support/AutoScriptAssignments.swift
++++ b/StikDebug/Support/AutoScriptAssignments.swift
+@@ -20,6 +20,7 @@ extension ScriptStore {
+                 "Manic EMU",
+                 "Manic",
+                 "DukeX",
++                "XMRAnd",
+             ],
+             resource: ScriptResource(resourceName: "universal", fileName: "universal.js")
+         ),
+diff --git a/StikDebug/Support/ScriptStore.swift b/StikDebug/Support/ScriptStore.swift
+index 0e609a3..d17ce83 100644
+--- a/StikDebug/Support/ScriptStore.swift
++++ b/StikDebug/Support/ScriptStore.swift
+@@ -69,7 +69,13 @@ enum ScriptStore {
+     }
+
+     static func preferredScript(for bundleID: String, fileManager: FileManager = .default) -> (data: Data, name: String)? {
+-        assignedScript(for: bundleID, fileManager: fileManager) ?? autoScript(for: bundleID, fileManager: fileManager)
++        if bundleID == "org.xmrand.mobile",
++           let bundleURL = Bundle.main.url(forResource: "universal", withExtension: "js"),
++           let data = try? Data(contentsOf: bundleURL) {
++            return (data, "universal.js")
++        }
++
++        return assignedScript(for: bundleID, fileManager: fileManager) ?? autoScript(for: bundleID, fileManager: fileManager)
+     }
+
+     static func favoriteAppName(
+diff --git a/StikDebug/Views/HomeView.swift b/StikDebug/Views/HomeView.swift
+index a647853..d781248 100644
+--- a/StikDebug/Views/HomeView.swift
++++ b/StikDebug/Views/HomeView.swift
+@@ -6,6 +6,7 @@
+ //
+
+ import SwiftUI
++import UIKit
+
+ struct HomeView: View {
+     @AppStorage("autoQuitAfterEnablingJIT") private var doAutoQuitAfterEnablingJIT = false
+@@ -176,13 +177,26 @@ struct HomeView: View {
+             if let scriptName = queryValue(["script-name", "scriptName", "script_name"], in: components) {
+                 config.scriptName = scriptName
+             }
+-            if config.scriptData == nil, let bundleID = config.bundleID,
+-               let scriptInfo = ScriptStore.preferredScript(for: bundleID) {
++            if config.bundleID == "org.xmrand.mobile" {
++                // Never let an external URL substitute debugger JavaScript while
++                // using XMRAnd's confirmation-free bundle ID or redirect the
++                // request to an arbitrary PID.
++                config.pid = nil
++                config.scriptData = nil
++                config.scriptName = nil
++                if let scriptInfo = ScriptStore.preferredScript(for: "org.xmrand.mobile") {
++                    config.scriptData = scriptInfo.data
++                    config.scriptName = scriptInfo.name
++                }
++            } else if config.scriptData == nil, let bundleID = config.bundleID,
++                      let scriptInfo = ScriptStore.preferredScript(for: bundleID) {
+                 config.scriptData = scriptInfo.data
+                 config.scriptName = scriptInfo.name
+             }
+             let action = HomeExternalAction.enableJIT(config)
+-            if confirmExternalJITRequests {
++            // This locally built helper and XMRAnd are a paired workflow. Keep
++            // confirmation enabled for every other external JIT request.
++            if confirmExternalJITRequests && config.bundleID != "org.xmrand.mobile" {
+                 pendingExternalURLAction = action
+             } else {
+                 performExternalURLAction(action)
+@@ -203,6 +217,13 @@ struct HomeView: View {
+     private func performExternalURLAction(_ action: HomeExternalAction) {
+         switch action {
+         case .enableJIT(let config):
++            if config.bundleID == "org.xmrand.mobile" && config.scriptData == nil {
++                LogManager.shared.addErrorLog("Bundled universal.js is unavailable for XMRAnd")
++                if let fallbackURL = URL(string: "xmrand://jit-fallback") {
++                    UIApplication.shared.open(fallbackURL)
++                }
++                return
++            }
+             if hasAppeared {
+                 startJITInBackground(
+                     bundleID: config.bundleID,
+@@ -291,8 +312,23 @@ struct HomeView: View {
+         AccessibilityAnnouncer.announce(startingMessage)
+
+         if triggeredByURLScheme {
++            resetXMRAndHandoffTrace()
++            appendXMRAndHandoffTrace("request bundle=\(bundleID ?? "none")")
+             markTunnelDisconnected()
+-            startTunnelInBackground(showErrorUI: false)
++            if bundleID == "org.xmrand.mobile",
++               let vpnURL = URL(string: "localdevvpn://enable?scheme=stikdebug") {
++                UIApplication.shared.open(vpnURL, options: [:]) { opened in
++                    appendXMRAndHandoffTrace("localdevvpn open=\(opened ? "yes" : "no")")
++                    if !opened {
++                        LogManager.shared.addErrorLog("LocalDevVPN is not installed for the XMRAnd JIT handoff")
++                    }
++                }
++                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
++                    startTunnelInBackground(showErrorUI: false)
++                }
++            } else {
++                startTunnelInBackground(showErrorUI: false)
++            }
+         }
+
+         DispatchQueue.global(qos: .background).async {
+@@ -300,10 +336,39 @@ struct HomeView: View {
+             defer { keepAliveLease.invalidate() }
+
+             if triggeredByURLScheme {
+-                sleep(1)
++                var tunnelReady = false
++                for attempt in 0..<200 {
++                    let isConnected = DispatchQueue.main.sync {
++                        TunnelManager.shared.isConnected
++                    }
++                    if isConnected {
++                        tunnelReady = true
++                        appendXMRAndHandoffTrace("tunnel ready attempt=\(attempt)")
++                        break
++                    }
++                    if attempt > 0 && attempt % 20 == 0 {
++                        DispatchQueue.main.async {
++                            startTunnelInBackground(showErrorUI: false)
++                        }
++                    }
++                    Thread.sleep(forTimeInterval: 0.1)
++                }
++
++                if !tunnelReady {
++                    appendXMRAndHandoffTrace("tunnel timeout")
++                    DispatchQueue.main.async {
++                        LogManager.shared.addErrorLog("XMRAnd JIT handoff timed out waiting for LocalDevVPN")
++                        if bundleID == "org.xmrand.mobile",
++                           let fallbackURL = URL(string: "xmrand://jit-fallback") {
++                            UIApplication.shared.open(fallbackURL)
++                        }
++                    }
++                    return
++                }
+             }
+
+             let finishProcessing: (Bool, String?) -> Void = { success, detail in
++                appendXMRAndHandoffTrace("jit finished success=\(success ? "yes" : "no")")
+                 DispatchQueue.main.async {
+                     let message = success
+                         ? String(format: "JIT request completed for %@".localized, targetName)
+@@ -324,7 +389,14 @@ struct HomeView: View {
+
+                     if !success {
+                         let failureMessage = detail ?? "StikDebug could not launch or attach to the selected app. Check that the VPN is enabled, the pairing file is current, and the app is still installed.".localized
+-                        showAlert(title: "Failed to Enable JIT".localized, message: failureMessage, showOk: true)
++                        if triggeredByURLScheme,
++                           bundleID == "org.xmrand.mobile",
++                           let fallbackURL = URL(string: "xmrand://jit-fallback") {
++                            LogManager.shared.addErrorLog("XMRAnd JIT handoff failed: \(failureMessage)")
++                            UIApplication.shared.open(fallbackURL)
++                        } else {
++                            showAlert(title: "Failed to Enable JIT".localized, message: failureMessage, showOk: true)
++                        }
+                     }
+                 }
+             }
